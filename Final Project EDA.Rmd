@@ -1,0 +1,138 @@
+---
+title: "Final Project EDA"
+author: "Romy Gou"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+# Preparing Dataset
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(tools)
+library(caret)
+library(tidymodels)
+library(vip)
+```
+
+```{r}
+spotify <- read.csv("/Users/romygou/Documents/winter 2025/stats 140xp/spotify.csv")
+spotify <- spotify %>%
+  select(acousticness, danceability, energy, duration_ms, instrumentalness, valence, tempo, liveness, loudness, speechiness, key, year) %>%
+  na.omit()
+```
+
+Instead of using 'year' as the target, we'll categorize each song into the era it was released. This will make it easier to create visualizations and a classification model. The classes of our new target variable, 'era', are: '1920-40s' (jazz, swing, big band), '1950-60s' (pop, doo-wop, rock and roll), '1970-90s' (disco, funk, dance, hip-hop), and '2000-10s' (pop, hip-hop).
+
+```{r}
+spotify <- spotify %>%
+  mutate(era = case_when(
+    year >= 1920 & year <= 1949  ~ "1920-40s",
+    year >= 1950 & year <= 1969  ~ "1950-60s",
+    year >= 1970 & year <= 1999  ~ "1970-90s",
+    year >= 2000 & year <= 2020  ~ "2000-10s")) %>%
+  select(-year)
+spotify$era <- as.factor(spotify$era)
+
+# normalized data
+spotify_norm <- spotify %>%
+  mutate(across(where(is.numeric), ~ (. - min(.)) / (max(.) - min(.))))
+```
+
+# Visualizations
+
+Distribution of classes within target variable:
+
+```{r}
+ggplot(spotify_norm) +
+  aes(x = era) +
+  geom_bar(fill = "#4682B4") +
+  ggtitle(paste("Distribution of Songs by Era")) +
+  theme_minimal()
+```
+
+The classes are unbalanced, which means that we should either implement class weights or choose a classification model that handles imbalances well.
+
+```{r}
+features <- c("acousticness", "danceability", "energy", "duration_ms", "instrumentalness", "valence", "tempo", "liveness", "loudness", "speechiness", "key")
+
+for (i in 1:11) {
+  feature_plot <- ggplot(spotify_norm, aes(x = era, y = .data[[features[i]]])) +
+    geom_boxplot(fill = "#4682B4") +
+    theme_minimal() +
+    ggtitle(paste("Distribution of Normalized", toTitleCase(features[i]), "by Era"))
+  print(feature_plot)}
+```
+
+Right away, we can see that there may be some features that will be less useful in classifying the release era of a song due to lack of variation between eras, such as 'key' and 'liveness'.
+
+```{r}
+# table of standard deviation values
+spotify %>%
+  group_by(era) %>%
+  summarise(across(where(is.numeric), sd))
+```
+
+
+Considering the class imbalance and the large size of the data set, we'll train a random forest model.
+
+# Random Forest Model
+
+```{r}
+set.seed(123)
+data_split <- initial_split(spotify, prop = 0.8)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+rf_recipe <- recipe(era ~., data = train_data) %>%
+  step_normalize(all_numeric())
+
+rf_spec <- rand_forest() %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+rf_workflow <- workflow() %>%
+  add_recipe(rf_recipe) %>%
+  add_model(rf_spec)
+
+rf_fit <- rf_workflow %>%
+  fit(data = train_data)
+```
+
+```{r}
+predictions <- predict(rf_fit, new_data = test_data) %>%
+  pull(.pred_class)
+metrics <- metric_set(accuracy)
+performance <- test_data %>%
+  mutate(predictions = predictions) %>%
+  metrics(truth = era, estimate = predictions)
+print(performance)
+```
+
+```{r}
+# confusion matrix
+confusionMatrix(predictions, test_data$era)
+```
+
+```{r}
+vip(rf_fit)
+```
+
+# Research Questions:
+
+Can we predict the era a song was released based on different musical metrics, such as loudness, tempo, danceability, and energy? 
+
+**Answer:** Yes, we can produce a random forest model with 70.2% accuracy.
+
+Which musical metrics are most indicative of the era released?
+
+**Answer:** Acousticness and loudness are most indicative of era released.
+
+For which eras, if any, are musical metrics most similar? What does this say about the recycling of musical trends or the impact of cultural context on music? (Comparing metrics across eras)
+
+**Answer:** 1920-40s music is most often misclassified as 1950-60s music, 1950-60s music is most often misclassified as 1970-90s music, 1970-90s music is most often misclassified as 1950-60s music, and 2000-10s music is most often misclassified as 1970-90s music.
+
+Does the uniformity of the musical metrics of same-era songs change throughout time? In which era are the songs most uniform? In which era are the songs most diverse? (Comparing metrics within an era)
+
+**Answer:** The uniformity of musical metrics doesn't change significantly throughout time. However, by looking at the table of standard deviation values, we can see which eras had lower or higher standard deviations for certain musical metrics.
